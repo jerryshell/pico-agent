@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { ToolLoopAgent, tool, zodSchema } from "ai";
+import { ToolLoopAgent, isLoopFinished, tool, zodSchema } from "ai";
 import { exec } from "child_process";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -86,6 +86,7 @@ async function runAgent(apiKey: string, prompt: string) {
     model,
     headers: { "User-Agent": "KimiCLI/1.5" },
     tools: createTools(),
+    stopWhen: isLoopFinished(),
   });
 
   const result = await agent.stream({ prompt });
