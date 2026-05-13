@@ -20,7 +20,7 @@ async function main() {
 
   if (command.mode === "config") {
     await saveConfig({ apiKey: command.value });
-    console.log(`✅ apiKey 已保存到 ${CONFIG_FILE}`);
+    console.log(`apiKey 已保存到 ${CONFIG_FILE}`);
     return;
   }
 
@@ -179,7 +179,7 @@ function printChunk(chunk: any) {
       process.stdout.write("\n");
       break;
     case "reasoning-start":
-      process.stdout.write(`\n${separator()}\n${yellow(bold("🤔 思考"))}\n${separator()}\n`);
+      process.stdout.write(`\n${separator()}\n${yellow(bold("思考"))}\n${separator()}\n`);
       break;
     case "reasoning-delta":
       process.stdout.write(yellow(chunk.text));
@@ -189,14 +189,12 @@ function printChunk(chunk: any) {
       break;
     case "tool-call":
       process.stdout.write(
-        `\n${separator()}\n${cyan(bold("🔧 工具调用"))} ${cyan(chunk.toolName)}\n${separator()}\n`,
+        `\n${separator()}\n${cyan(bold("工具调用"))} ${cyan(chunk.toolName)}\n${separator()}\n`,
       );
       process.stdout.write(cyan(JSON.stringify(chunk.input, null, 2)) + "\n");
       break;
     case "tool-input-start":
-      process.stdout.write(
-        `\n${separator()}\n${cyan(bold("📥 工具输入"))} ${cyan(chunk.toolName)}\n`,
-      );
+      process.stdout.write(`\n${separator()}\n${cyan(bold("工具输入"))} ${cyan(chunk.toolName)}\n`);
       break;
     case "tool-input-delta":
       process.stdout.write(cyan(chunk.delta));
@@ -205,20 +203,20 @@ function printChunk(chunk: any) {
       process.stdout.write(`\n${separator()}\n`);
       break;
     case "tool-result":
-      process.stdout.write(`${green(bold("✅ 工具结果"))} ${green(chunk.toolName)}\n`);
+      process.stdout.write(`${green(bold("工具结果"))} ${green(chunk.toolName)}\n`);
       const output =
         typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output, null, 2);
       process.stdout.write(green(output) + "\n");
       break;
     case "tool-error":
-      process.stdout.write(`${red(bold("❌ 工具错误"))} ${red(chunk.toolName)}\n`);
+      process.stdout.write(`${red(bold("工具错误"))} ${red(chunk.toolName)}\n`);
       process.stdout.write(red(String(chunk.error)) + "\n");
       break;
     case "tool-output-denied":
-      process.stdout.write(`${yellow(bold("⛔ 输出被拒绝"))} ${yellow(chunk.toolName)}\n`);
+      process.stdout.write(`${yellow(bold("输出被拒绝"))} ${yellow(chunk.toolName)}\n`);
       break;
     case "tool-approval-request":
-      process.stdout.write(`${magenta(bold("⏳ 等待审批"))} ${magenta(chunk.toolCall.toolName)}\n`);
+      process.stdout.write(`${magenta(bold("等待审批"))} ${magenta(chunk.toolCall.toolName)}\n`);
       break;
     case "source":
       process.stdout.write(
@@ -226,7 +224,7 @@ function printChunk(chunk: any) {
       );
       break;
     case "file":
-      process.stdout.write(`${blue(bold("📄 文件"))} ${blue(chunk.file.mediaType)}\n`);
+      process.stdout.write(`${blue(bold("文件"))} ${blue(chunk.file.mediaType)}\n`);
       break;
     case "start-step":
       process.stdout.write(
