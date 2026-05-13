@@ -31,8 +31,6 @@ pa config apiKey yourKimiCodeApiKey
 pa "简单总结我的系统状态"
 ```
 
-> 如果未配置 apiKey，会提示：`没有检测到 apiKey，请使用 pa config apiKey yourKimiCodeApiKey 进行配置`
-
 你也可以通过 `API_KEY` 环境变量临时指定：
 
 ```bash

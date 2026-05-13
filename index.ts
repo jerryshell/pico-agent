@@ -46,7 +46,7 @@ function parseCommand() {
     if (key === "apiKey" && value) {
       return { mode: "config" as const, key, value };
     }
-    console.error("用法: pa config apiKey <yourKimiCodeApiKey>");
+    console.error("用法: pa config apiKey yourKimiCodeApiKey");
     process.exit(1);
   }
 
