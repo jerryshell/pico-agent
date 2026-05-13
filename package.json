@@ -1,6 +1,6 @@
 {
   "name": "@jerryshell/pico-agent",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "一个轻量级 LLM Agent",
   "keywords": [
     "agent",
