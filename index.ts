@@ -2,25 +2,78 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { ToolLoopAgent, tool, zodSchema } from "ai";
 import { exec } from "child_process";
-import { readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { homedir } from "os";
+import { join } from "path";
 import { parseArgs, promisify } from "util";
 import { z } from "zod";
 
 const execAsync = promisify(exec);
 
-const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
-const blue = (s: string) => `\x1b[34m${s}\x1b[39m`;
-const magenta = (s: string) => `\x1b[35m${s}\x1b[39m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const separator = () => dim("─".repeat(40));
+const CONFIG_DIR = join(homedir(), ".pico-agent");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+
+// === 最高层 ===
 
 async function main() {
-  const { apiKey, prompt } = getConfig();
+  const command = parseCommand();
 
+  if (command.mode === "config") {
+    await saveConfig({ apiKey: command.value });
+    console.log(`✅ apiKey 已保存到 ${CONFIG_FILE}`);
+    return;
+  }
+
+  const apiKey = await resolveApiKey();
+  if (!apiKey) {
+    console.error("没有检测到 apiKey，请使用 pa config apiKey yourKimiCodeApiKey 进行配置");
+    process.exit(1);
+  }
+
+  await runAgent(apiKey, command.prompt);
+}
+
+// === 命令解析 ===
+
+function parseCommand() {
+  const { positionals } = parseArgs({
+    strict: false,
+    allowPositionals: true,
+  });
+
+  if (positionals[0] === "config") {
+    const [, key, value] = positionals;
+    if (key === "apiKey" && value) {
+      return { mode: "config" as const, key, value };
+    }
+    console.error("用法: pa config apiKey <yourKimiCodeApiKey>");
+    process.exit(1);
+  }
+
+  if (positionals.length === 0) {
+    console.error("用法: pa <prompt>");
+    process.exit(1);
+  }
+
+  return {
+    mode: "run" as const,
+    prompt: positionals.join(" "),
+  };
+}
+
+// === apiKey 解析 ===
+
+async function resolveApiKey(): Promise<string | undefined> {
+  const envKey = process.env.API_KEY;
+  if (envKey) return envKey;
+
+  const fileConfig = await loadConfig();
+  return fileConfig.apiKey;
+}
+
+// === Agent 运行 ===
+
+async function runAgent(apiKey: string, prompt: string) {
   const provider = createOpenAICompatible({
     name: "Kimi For Coding",
     apiKey,
@@ -29,13 +82,25 @@ async function main() {
 
   const model = provider("kimi-for-coding");
 
+  const agent = new ToolLoopAgent({
+    model,
+    headers: { "User-Agent": "KimiCLI/1.5" },
+    tools: createTools(),
+  });
+
+  const result = await agent.stream({ prompt });
+
+  for await (const chunk of result.fullStream) {
+    printChunk(chunk);
+  }
+}
+
+// === 工具 ===
+
+function createTools() {
   const read = tool({
     description: "读取文件内容",
-    inputSchema: zodSchema(
-      z.object({
-        path: z.string().describe("文件路径"),
-      }),
-    ),
+    inputSchema: zodSchema(z.object({ path: z.string().describe("文件路径") })),
     execute: async ({ path }: { path: string }) => {
       try {
         return await readFile(path, "utf-8");
@@ -88,11 +153,7 @@ async function main() {
 
   const bash = tool({
     description: "运行 shell 命令",
-    inputSchema: zodSchema(
-      z.object({
-        command: z.string().describe("要执行的 shell 命令"),
-      }),
-    ),
+    inputSchema: zodSchema(z.object({ command: z.string().describe("要执行的 shell 命令") })),
     execute: async ({ command }: { command: string }) => {
       try {
         const { stdout, stderr } = await execAsync(command);
@@ -103,130 +164,129 @@ async function main() {
     },
   });
 
-  const agent = new ToolLoopAgent({
-    model,
-    headers: { "User-Agent": "KimiCLI/1.5" },
-    tools: { read, write, edit, bash },
-  });
+  return { read, write, edit, bash };
+}
 
-  const result = await agent.stream({ prompt });
+// === Chunk 输出 ===
 
-  for await (const chunk of result.fullStream) {
-    switch (chunk.type) {
-      case "text-delta":
-        process.stdout.write(chunk.text);
-        break;
-      case "text-start":
-      case "text-end":
-        process.stdout.write("\n");
-        break;
-      case "reasoning-start":
-        process.stdout.write(`\n${separator()}\n${yellow(bold("🤔 思考"))}\n${separator()}\n`);
-        break;
-      case "reasoning-delta":
-        process.stdout.write(yellow(chunk.text));
-        break;
-      case "reasoning-end":
-        process.stdout.write(`\n${separator()}\n`);
-        break;
-      case "tool-call":
-        process.stdout.write(
-          `\n${separator()}\n${cyan(bold("🔧 工具调用"))} ${cyan(chunk.toolName)}\n${separator()}\n`,
-        );
-        process.stdout.write(cyan(JSON.stringify(chunk.input, null, 2)) + "\n");
-        break;
-      case "tool-input-start":
-        process.stdout.write(
-          `\n${separator()}\n${cyan(bold("📥 工具输入"))} ${cyan(chunk.toolName)}\n`,
-        );
-        break;
-      case "tool-input-delta":
-        process.stdout.write(cyan(chunk.delta));
-        break;
-      case "tool-input-end":
-        process.stdout.write(`\n${separator()}\n`);
-        break;
-      case "tool-result":
-        process.stdout.write(`${green(bold("✅ 工具结果"))} ${green(chunk.toolName)}\n`);
-        const output =
-          typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output, null, 2);
-        process.stdout.write(green(output) + "\n");
-        break;
-      case "tool-error":
-        process.stdout.write(`${red(bold("❌ 工具错误"))} ${red(chunk.toolName)}\n`);
-        process.stdout.write(red(String(chunk.error)) + "\n");
-        break;
-      case "tool-output-denied":
-        process.stdout.write(`${yellow(bold("⛔ 输出被拒绝"))} ${yellow(chunk.toolName)}\n`);
-        break;
-      case "tool-approval-request":
-        process.stdout.write(
-          `${magenta(bold("⏳ 等待审批"))} ${magenta(chunk.toolCall.toolName)}\n`,
-        );
-        break;
-      case "source":
-        process.stdout.write(
-          `${dim("[来源]")} ${dim(chunk.sourceType === "url" ? chunk.url : chunk.title)}\n`,
-        );
-        break;
-      case "file":
-        process.stdout.write(`${blue(bold("📄 文件"))} ${blue(chunk.file.mediaType)}\n`);
-        break;
-      case "start-step":
-        process.stdout.write(
-          `\n${dim("=".repeat(40))}\n${bold("步骤开始")}\n${dim("=".repeat(40))}\n`,
-        );
-        break;
-      case "finish-step":
-        process.stdout.write(
-          `${dim(`步骤结束 | 结束原因: ${chunk.finishReason} | tokens: ${JSON.stringify(chunk.usage)}`)}\n`,
-        );
-        break;
-      case "start":
-        process.stdout.write(`${bold("开始")}\n`);
-        break;
-      case "finish":
-        process.stdout.write(
-          `${bold("完成")} | 结束原因: ${chunk.finishReason} | tokens: ${JSON.stringify(chunk.totalUsage)}\n`,
-        );
-        break;
-      case "abort":
-        process.stdout.write(`${red(bold("中断"))}${chunk.reason ? `: ${chunk.reason}` : ""}\n`);
-        break;
-      case "error":
-        process.stdout.write(`${red(bold("错误"))}: ${String(chunk.error)}\n`);
-        break;
-      case "raw":
-        break;
-    }
+function printChunk(chunk: any) {
+  switch (chunk.type) {
+    case "text-delta":
+      process.stdout.write(chunk.text);
+      break;
+    case "text-start":
+    case "text-end":
+      process.stdout.write("\n");
+      break;
+    case "reasoning-start":
+      process.stdout.write(`\n${separator()}\n${yellow(bold("🤔 思考"))}\n${separator()}\n`);
+      break;
+    case "reasoning-delta":
+      process.stdout.write(yellow(chunk.text));
+      break;
+    case "reasoning-end":
+      process.stdout.write(`\n${separator()}\n`);
+      break;
+    case "tool-call":
+      process.stdout.write(
+        `\n${separator()}\n${cyan(bold("🔧 工具调用"))} ${cyan(chunk.toolName)}\n${separator()}\n`,
+      );
+      process.stdout.write(cyan(JSON.stringify(chunk.input, null, 2)) + "\n");
+      break;
+    case "tool-input-start":
+      process.stdout.write(
+        `\n${separator()}\n${cyan(bold("📥 工具输入"))} ${cyan(chunk.toolName)}\n`,
+      );
+      break;
+    case "tool-input-delta":
+      process.stdout.write(cyan(chunk.delta));
+      break;
+    case "tool-input-end":
+      process.stdout.write(`\n${separator()}\n`);
+      break;
+    case "tool-result":
+      process.stdout.write(`${green(bold("✅ 工具结果"))} ${green(chunk.toolName)}\n`);
+      const output =
+        typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output, null, 2);
+      process.stdout.write(green(output) + "\n");
+      break;
+    case "tool-error":
+      process.stdout.write(`${red(bold("❌ 工具错误"))} ${red(chunk.toolName)}\n`);
+      process.stdout.write(red(String(chunk.error)) + "\n");
+      break;
+    case "tool-output-denied":
+      process.stdout.write(`${yellow(bold("⛔ 输出被拒绝"))} ${yellow(chunk.toolName)}\n`);
+      break;
+    case "tool-approval-request":
+      process.stdout.write(`${magenta(bold("⏳ 等待审批"))} ${magenta(chunk.toolCall.toolName)}\n`);
+      break;
+    case "source":
+      process.stdout.write(
+        `${dim("[来源]")} ${dim(chunk.sourceType === "url" ? chunk.url : chunk.title)}\n`,
+      );
+      break;
+    case "file":
+      process.stdout.write(`${blue(bold("📄 文件"))} ${blue(chunk.file.mediaType)}\n`);
+      break;
+    case "start-step":
+      process.stdout.write(
+        `\n${dim("=".repeat(40))}\n${bold("步骤开始")}\n${dim("=".repeat(40))}\n`,
+      );
+      break;
+    case "finish-step":
+      process.stdout.write(
+        `${dim(`步骤结束 | 结束原因: ${chunk.finishReason} | tokens: ${JSON.stringify(chunk.usage)}`)}\n`,
+      );
+      break;
+    case "start":
+      process.stdout.write(`${bold("开始")}\n`);
+      break;
+    case "finish":
+      process.stdout.write(
+        `${bold("完成")} | 结束原因: ${chunk.finishReason} | tokens: ${JSON.stringify(chunk.totalUsage)}\n`,
+      );
+      break;
+    case "abort":
+      process.stdout.write(`${red(bold("中断"))}${chunk.reason ? `: ${chunk.reason}` : ""}\n`);
+      break;
+    case "error":
+      process.stdout.write(`${red(bold("错误"))}: ${String(chunk.error)}\n`);
+      break;
+    case "raw":
+      break;
   }
 }
 
-function getConfig() {
-  const { values, positionals } = parseArgs({
-    options: { "api-key": { type: "string" } },
-    strict: false,
-    allowPositionals: true,
-  });
+// === 配置读写 ===
 
-  if (positionals.length === 0) {
-    throw new Error("请提供要询问的内容");
+interface Config {
+  apiKey?: string;
+}
+
+async function loadConfig(): Promise<Config> {
+  try {
+    const content = await readFile(CONFIG_FILE, "utf-8");
+    return JSON.parse(content) as Config;
+  } catch {
+    return {};
   }
-
-  return {
-    apiKey: getApiKey(values),
-    prompt: positionals.join(" "),
-  };
 }
 
-function getApiKey(args: Record<string, unknown>): string {
-  const cliKey = args["api-key"] as string | undefined;
-  if (cliKey) return cliKey;
-
-  const envKey = process.env.API_KEY;
-  if (envKey) return envKey;
-
-  throw new Error("请使用 --api-key 参数或设置 API_KEY 环境变量");
+async function saveConfig(config: Config): Promise<void> {
+  await mkdir(CONFIG_DIR, { recursive: true });
+  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
+
+// === 视觉辅助 ===
+
+const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+const blue = (s: string) => `\x1b[34m${s}\x1b[39m`;
+const magenta = (s: string) => `\x1b[35m${s}\x1b[39m`;
+const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+const separator = () => dim("─".repeat(40));
 
 main();

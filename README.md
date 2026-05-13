@@ -17,10 +17,26 @@ Pico 是一个轻量级 Agent，给 LLM 提供了 4 种工具：
 npm install -g @jerryshell/pico-agent
 ```
 
-### 2. 运行
+### 2. 配置 API Key
 
 ```bash
-pa --api-key=xxx "简单总结我的系统状态"
+pa config apiKey yourKimiCodeApiKey
+```
+
+配置保存在 `~/.pico-agent/config.json`
+
+### 3. 运行
+
+```bash
+pa "简单总结我的系统状态"
+```
+
+> 如果未配置 apiKey，会提示：`没有检测到 apiKey，请使用 pa config apiKey yourKimiCodeApiKey 进行配置`
+
+你也可以通过 `API_KEY` 环境变量临时指定：
+
+```bash
+API_KEY=xxx pa "简单总结我的系统状态"
 ```
 
 ## 开发环境
@@ -34,5 +50,11 @@ bun install
 运行
 
 ```bash
-bun run index.ts --api-key=xxx "简单总结我的系统状态"
+bun run index.ts "简单总结我的系统状态"
+```
+
+构建
+
+```bash
+bun run build
 ```
