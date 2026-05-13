@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { ToolLoopAgent, tool, zodSchema } from "ai";
 import { exec } from "child_process";
