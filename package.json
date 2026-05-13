@@ -1,6 +1,6 @@
 {
   "name": "@jerryshell/pico-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "一个轻量级 LLM Agent",
   "keywords": [
     "agent",
@@ -25,7 +25,8 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "bun build index.ts --target=node --outfile=dist/index.js"
+    "build": "bun build index.ts --target=node --outfile=dist/index.js",
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.47",
