@@ -1,6 +1,6 @@
 {
   "name": "@jerryshell/pico-agent",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "一个轻量级 LLM Agent",
   "keywords": [
     "agent",
@@ -25,7 +25,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "bun build index.ts --target=node --outfile=dist/index.js",
+    "build": "bun build index.ts --target=node --outfile=dist/index.js --minify",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
