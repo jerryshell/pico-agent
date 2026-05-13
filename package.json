@@ -1,0 +1,41 @@
+{
+  "name": "@jerryshell/pico-agent",
+  "version": "1.0.0",
+  "description": "一个轻量级 LLM Agent",
+  "keywords": [
+    "agent",
+    "cli"
+  ],
+  "homepage": "https://github.com/jerryshell/pico-agent",
+  "bugs": {
+    "url": "https://github.com/jerryshell/pico-agent/issues"
+  },
+  "license": "MIT",
+  "author": "github.com/jerryshell",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jerryshell/pico-agent.git"
+  },
+  "bin": {
+    "pa": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "bun build index.ts --target=node --outfile=dist/index.js"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.47",
+    "ai": "^6.0.180",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13"
+  },
+  "peerDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
