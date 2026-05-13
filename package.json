@@ -25,7 +25,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "bun build index.ts --target=node --outfile=dist/index.js --minify",
+    "build": "bun build --target node --production --outdir dist index.ts",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
