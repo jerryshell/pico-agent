@@ -2,7 +2,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { ToolLoopAgent, isLoopFinished, tool, zodSchema } from "ai";
 import { exec } from "child_process";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { parseArgs, promisify } from "util";
@@ -12,6 +12,8 @@ const execAsync = promisify(exec);
 
 const CONFIG_DIR = join(homedir(), ".pico-agent");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+const HOME_SKILLS_DIR = join(homedir(), ".agents", "skills");
+const LOCAL_SKILLS_DIR = join(process.cwd(), ".agents", "skills");
 
 // === 最高层 ===
 
@@ -82,10 +84,23 @@ async function runAgent(apiKey: string, prompt: string) {
 
   const model = provider("kimi-for-coding");
 
+  const skills = await discoverSkills();
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  if (skills.length > 0) {
+    console.log(`发现 ${skills.length} 个技能:`);
+    for (const skill of skills) {
+      console.log(`  ${cyan("◉")} ${bold(skill.name)}: ${skill.description}`);
+    }
+    console.log();
+  }
+  const baseTools = createTools();
+  const tools = skills.length > 0 ? { ...baseTools, skill: createSkillTool(skills) } : baseTools;
+
   const agent = new ToolLoopAgent({
     model,
     headers: { "User-Agent": "KimiCLI/1.5" },
-    tools: createTools(),
+    instructions: buildSkillsPrompt(skills),
+    tools,
     stopWhen: isLoopFinished(),
   });
 
@@ -274,6 +289,112 @@ async function loadConfig(): Promise<Config> {
 async function saveConfig(config: Config): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
   await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
+}
+
+// === Skill 自动发现 ===
+
+interface Skill {
+  name: string;
+  description: string;
+  dirPath: string;
+}
+
+async function discoverSkills(): Promise<Skill[]> {
+  const all = new Map<string, Skill>();
+
+  for (const dir of [HOME_SKILLS_DIR, LOCAL_SKILLS_DIR]) {
+    try {
+      const entries = await readdir(dir);
+      for (const entry of entries) {
+        const dirPath = join(dir, entry);
+        const entryStat = await stat(dirPath);
+        if (!entryStat.isDirectory()) continue;
+
+        const skillMdPath = join(dirPath, "SKILL.md");
+        let content: string;
+        try {
+          content = await readFile(skillMdPath, "utf-8");
+        } catch {
+          continue;
+        }
+
+        const parsed = parseFrontmatter(content);
+        if (parsed.name) {
+          all.set(parsed.name, {
+            name: parsed.name,
+            description: parsed.description ?? "",
+            dirPath,
+          });
+        }
+      }
+    } catch {
+      // 目录不存在，跳过
+    }
+  }
+
+  return [...all.values()];
+}
+
+function parseFrontmatter(content: string): { name?: string; description?: string } {
+  const match = content.match(/^---\n([\s\S]*?)---\n/);
+  if (!match) return {};
+
+  const lines = match[1]!.split("\n");
+  const result: { name?: string; description?: string } = {};
+
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(/^(\w+):\s*(.*)$/);
+    if (!header) continue;
+
+    const key = header[1]!;
+    let value = header[2]!;
+    const isBlock = value === ">" || value === "|";
+
+    if (isBlock) {
+      const parts: string[] = [];
+      i++;
+      while (i < lines.length && (lines[i]!.startsWith(" ") || lines[i]!.startsWith("\t"))) {
+        parts.push(lines[i]!.trim());
+        i++;
+      }
+      i--;
+      value = value === "|" ? parts.join("\n").trim() : parts.join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    if (key === "name") result.name = value;
+    else if (key === "description") result.description = value;
+  }
+
+  return result;
+}
+
+function buildSkillsPrompt(skills: Skill[]): string | undefined {
+  if (skills.length === 0) return undefined;
+
+  return [
+    "你可以通过 skill 工具按需加载特定技能的详细内容（如技术参考、代码模板、库用法等）。",
+    "",
+    "可用技能：",
+    ...skills.map(
+      (skill) => `  - ${skill.name}${skill.description ? `: ${skill.description}` : ""}`,
+    ),
+    "",
+    "当用户请求涉及以上领域时，先调用 skill 工具加载对应内容，再按文档执行。",
+  ].join("\n");
+}
+
+function createSkillTool(skills: Skill[]) {
+  const index = new Map(skills.map((s) => [s.name, s]));
+
+  return tool({
+    description: "加载指定技能的详细内容",
+    inputSchema: zodSchema(z.object({ name: z.string().describe("技能名称") })),
+    execute: async ({ name }: { name: string }) => {
+      const skill = index.get(name);
+      if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
+      return await readFile(join(skill.dirPath, "SKILL.md"), "utf-8");
+    },
+  });
 }
 
 // === 视觉辅助 ===
