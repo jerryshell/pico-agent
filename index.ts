@@ -405,8 +405,7 @@ function printChunk(chunk: TextStreamPart<any>) {
       break;
     case "tool-result": {
       log(`${green(bold("工具结果"))} ${green(chunk.toolName)}`);
-      const output =
-        typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output);
+      const output = typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output);
       for (const line of output.split("\n")) {
         log(green(line));
       }
