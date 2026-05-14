@@ -6,15 +6,10 @@
     "agent",
     "cli"
   ],
-  "homepage": "https://github.com/jerryshell/pico-agent",
-  "bugs": {
-    "url": "https://github.com/jerryshell/pico-agent/issues"
-  },
   "license": "MIT",
-  "author": "github.com/jerryshell",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jerryshell/pico-agent.git"
+    "url": "https://github.com/jerryshell/pico-agent"
   },
   "bin": {
     "pa": "dist/index.js"
