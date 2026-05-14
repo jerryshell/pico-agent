@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { ToolLoopAgent, isLoopFinished, tool, zodSchema } from "ai";
-import type { TextStreamPart } from "ai";
+import type { ImagePart, ModelMessage, TextStreamPart } from "ai";
 import { exec } from "child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -10,6 +10,15 @@ import { parseArgs, promisify } from "util";
 import { z } from "zod";
 
 const execAsync = promisify(exec);
+
+const viewImageStore: Array<{ mimeType: string; data: string }> = [];
+const MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
 
 const CONFIG_DIR = join(homedir(), ".pico-agent");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -92,7 +101,7 @@ async function loadConfig(): Promise<Config> {
 
 async function saveConfig(config: Config): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  await writeFile(CONFIG_FILE, JSON.stringify(config) + "\n", "utf-8");
 }
 
 // === agent ===
@@ -126,13 +135,74 @@ async function runAgent(apiKey: string, prompt: string) {
     instructions: buildSkillsPrompt(skills),
     tools,
     stopWhen: isLoopFinished(),
+    prepareStep: async ({ messages }) => {
+      if (viewImageStore.length === 0) return;
+      const images = viewImageStore.splice(0);
+      return {
+        messages: [
+          ...messages,
+          {
+            role: "user",
+            content: images.map((img) => ({
+              type: "image" as const,
+              image: img.data,
+              mediaType: img.mimeType,
+            })),
+          },
+        ],
+      };
+    },
   });
 
-  const result = await agent.stream({ prompt });
+  const { text, images } = await extractImagesFromPrompt(prompt);
+  const messages: Array<ModelMessage> =
+    images.length > 0
+      ? [{ role: "user", content: [{ type: "text" as const, text }, ...images] }]
+      : [{ role: "user", content: text }];
+
+  const result = await agent.stream({
+    messages,
+  } as any);
 
   for await (const chunk of result.fullStream) {
     printChunk(chunk);
   }
+}
+
+async function extractImagesFromPrompt(
+  raw: string,
+): Promise<{ text: string; images: ImagePart[] }> {
+  const IMAGE_RE = /([\w.\/\\-]+\.(?:png|jpg|jpeg|gif|webp))/gi;
+  const cwd = process.cwd();
+  const seen = new Set<string>();
+  let resultText = raw;
+  const resultImages: ImagePart[] = [];
+
+  for (const m of raw.matchAll(IMAGE_RE)) {
+    const name = m[1]!;
+    if (seen.has(name)) continue;
+    const resolved = join(cwd, name);
+    try {
+      await stat(resolved);
+    } catch {
+      continue;
+    }
+    seen.add(name);
+    try {
+      const buf = await readFile(resolved);
+      const ext = name.toLowerCase().split(".").pop()!;
+      resultImages.push({ type: "image", image: buf.toString("base64"), mediaType: MIME[ext] });
+    } catch {
+      seen.delete(name);
+    }
+  }
+
+  for (const name of seen) {
+    resultText = resultText.replaceAll(name, "");
+  }
+  resultText = resultText.trim();
+
+  return { text: resultText, images: resultImages };
 }
 
 // === tools ===
@@ -243,7 +313,19 @@ function createTools() {
     },
   });
 
-  return { read, write, edit, bash };
+  const view = tool({
+    description: "查看图片文件（支持 png/jpg/gif/webp）。用户提及图片时调用此工具。",
+    inputSchema: zodSchema(z.object({ path: z.string().describe("图片文件路径") })),
+    execute: async ({ path }: { path: string }) => {
+      const ext = path.toLowerCase().split(".").pop()!;
+      if (!MIME[ext]) throw new Error(`不支持的图片格式: .${ext}`);
+      const buf = await readFile(path);
+      viewImageStore.push({ mimeType: MIME[ext], data: buf.toString("base64") });
+      return `已读取图片 ${basename(path)}`;
+    },
+  });
+
+  return { read, write, edit, bash, view };
 }
 
 function createSkillTool(skills: Skill[]) {
@@ -288,8 +370,15 @@ function buildSkillsPrompt(skills: Skill[]): string | undefined {
 
 // === output ===
 
+const rule = () => log(dim("─".repeat(40)));
+const open = (title: string) => {
+  rule();
+  log(title);
+};
+
 function printChunk(chunk: TextStreamPart<any>) {
   switch (chunk.type) {
+    // ── text output (stdout) ──
     case "text-delta":
       process.stdout.write(chunk.text);
       break;
@@ -297,33 +386,30 @@ function printChunk(chunk: TextStreamPart<any>) {
     case "text-end":
       process.stdout.write("\n");
       break;
+
+    // ── reasoning (stdout) ──
     case "reasoning-start":
-      log(`\n${separator()}\n${yellow(bold("思考"))}\n${separator()}`);
+      open(yellow(bold("思考")));
       break;
     case "reasoning-delta":
       process.stdout.write(yellow(chunk.text));
       break;
     case "reasoning-end":
-      log(separator());
+      process.stdout.write("\n");
       break;
+
+    // ── tool interaction (stderr) ──
     case "tool-call":
-      log(`\n${separator()}\n ${cyan(bold("工具调用"))} ${cyan(chunk.toolName)}\n${separator()}`);
-      log(`  ${cyan(JSON.stringify(chunk.input, null, 2))}`);
-      break;
-    case "tool-input-start":
-      log(`\n${separator()}\n ${cyan(bold("工具输入"))} ${cyan(chunk.toolName)}`);
-      break;
-    case "tool-input-delta":
-      process.stderr.write(cyan(chunk.delta));
-      break;
-    case "tool-input-end":
-      log(separator());
+      open(`${cyan(bold("工具调用"))} ${cyan(chunk.toolName)}`);
+      log(`  ${cyan(JSON.stringify(chunk.input))}`);
       break;
     case "tool-result": {
       log(` ${green(bold("工具结果"))} ${green(chunk.toolName)}`);
       const output =
-        typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output, null, 2);
-      log(`  ${green(output)}`);
+        typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output);
+      for (const line of output.split("\n")) {
+        log(`  ${green(line)}`);
+      }
       break;
     }
     case "tool-error":
@@ -336,20 +422,18 @@ function printChunk(chunk: TextStreamPart<any>) {
     case "tool-approval-request":
       log(` ${magenta(bold("等待审批"))} ${magenta(chunk.toolCall.toolName)}`);
       break;
-    case "source":
-      log(`${dim("[来源]")} ${dim(chunk.sourceType === "url" ? chunk.url : chunk.title)}`);
-      break;
-    case "file":
-      log(`${blue(bold("文件"))} ${blue(chunk.file.mediaType)}`);
-      break;
+
+    // ── step lifecycle (stderr) ──
     case "start-step":
-      log(`\n${separator()}\n${bold("步骤开始")}\n${separator()}`);
+      open(bold("步骤开始"));
       break;
     case "finish-step":
-      log(`${dim(`步骤结束 | ${chunk.finishReason}`)}`);
+      log(dim(`步骤结束 | ${chunk.finishReason}`));
       break;
+
+    // ── session lifecycle (stderr) ──
     case "start":
-      log(`${bold("开始")}`);
+      log(bold("开始"));
       break;
     case "finish":
       log(formatFinish(chunk));
@@ -360,7 +444,17 @@ function printChunk(chunk: TextStreamPart<any>) {
     case "error":
       log(`${red(bold("错误"))}: ${String(chunk.error)}`);
       break;
-    case "raw":
+
+    // ── metadata (stderr) ──
+    case "source":
+      log(`${dim("[来源]")} ${dim(chunk.sourceType === "url" ? chunk.url : chunk.title)}`);
+      break;
+    case "file":
+      log(`${blue(bold("文件"))} ${blue(chunk.file.mediaType)}`);
+      break;
+
+    // ── skip (tool-input, raw, etc) ──
+    default:
       break;
   }
 }
@@ -380,7 +474,7 @@ function formatFinish(chunk: Extract<TextStreamPart<any>, { type: "finish" }>): 
     parts.push(`↓${fmt(usage.outputTokens ?? 0)}`);
     parts.push(`∑${fmt(usage.totalTokens ?? 0)}`);
   }
-  return parts.join(" | ");
+  return dim(parts.join(" | "));
 }
 
 // === skills ===
@@ -515,7 +609,6 @@ const red = style("\x1b[31m", "\x1b[39m");
 const blue = style("\x1b[34m", "\x1b[39m");
 const magenta = style("\x1b[35m", "\x1b[39m");
 const bold = noColor ? (s: string) => s : (s: string) => `\x1b[1m${s}\x1b[22m`;
-const separator = () => dim("─".repeat(40));
 const log = (msg: string) => process.stderr.write(msg + "\n");
 
 main();
