@@ -4,7 +4,7 @@ import { ToolLoopAgent, isLoopFinished, tool, zodSchema } from "ai";
 import { exec } from "child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, dirname, join } from "path";
 import { parseArgs, promisify } from "util";
 import { z } from "zod";
 
@@ -87,11 +87,7 @@ async function runAgent(apiKey: string, prompt: string) {
   const skills = await discoverSkills();
   skills.sort((a, b) => a.name.localeCompare(b.name));
   if (skills.length > 0) {
-    console.log(`发现 ${skills.length} 个技能:`);
-    for (const skill of skills) {
-      console.log(`  ${cyan("◉")} ${bold(skill.name)}: ${skill.description}`);
-    }
-    console.log();
+    console.log(`发现 ${skills.length} 个技能: ${skills.map((s) => bold(s.name)).join(", ")}`);
   }
   const baseTools = createTools();
   const tools = skills.length > 0 ? { ...baseTools, skill: createSkillTool(skills) } : baseTools;
@@ -296,43 +292,91 @@ async function saveConfig(config: Config): Promise<void> {
 interface Skill {
   name: string;
   description: string;
-  dirPath: string;
+  filePath: string;
 }
 
 async function discoverSkills(): Promise<Skill[]> {
-  const all = new Map<string, Skill>();
+  const skills = new Map<string, Skill>();
 
   for (const dir of [HOME_SKILLS_DIR, LOCAL_SKILLS_DIR]) {
     try {
-      const entries = await readdir(dir);
-      for (const entry of entries) {
-        const dirPath = join(dir, entry);
-        const entryStat = await stat(dirPath);
-        if (!entryStat.isDirectory()) continue;
-
-        const skillMdPath = join(dirPath, "SKILL.md");
-        let content: string;
-        try {
-          content = await readFile(skillMdPath, "utf-8");
-        } catch {
-          continue;
-        }
-
-        const parsed = parseFrontmatter(content);
-        if (parsed.name) {
-          all.set(parsed.name, {
-            name: parsed.name,
-            description: parsed.description ?? "",
-            dirPath,
-          });
-        }
-      }
+      await stat(dir);
     } catch {
-      // 目录不存在，跳过
+      continue;
     }
+    await discoverIn(dir, skills, true);
   }
 
-  return [...all.values()];
+  return [...skills.values()];
+}
+
+async function discoverIn(
+  dir: string,
+  skills: Map<string, Skill>,
+  rootLevel: boolean,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return;
+  }
+
+  if (names.includes("SKILL.md")) {
+    const s = await loadSkill(join(dir, "SKILL.md"));
+    if (s) addSkill(skills, s);
+    return;
+  }
+
+  for (const name of names.sort()) {
+    if (name.startsWith(".") || name === "node_modules") continue;
+    const fp = join(dir, name);
+    let st;
+    try {
+      st = await stat(fp);
+    } catch {
+      continue;
+    }
+
+    if (st.isDirectory()) {
+      await discoverIn(fp, skills, false);
+    } else if (rootLevel && name.endsWith(".md")) {
+      const s = await loadSkill(fp);
+      if (s) addSkill(skills, s);
+    }
+  }
+}
+
+async function loadSkill(filePath: string): Promise<Skill | null> {
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  const fm = parseFrontmatter(content);
+  const name = fm.name || basename(dirname(filePath));
+
+  if (!fm.description || !fm.description.trim()) {
+    process.stderr.write(`skill ${filePath}: description 为空，跳过\n`);
+    return null;
+  }
+  if (!/^[a-z0-9-]+$/.test(name)) {
+    process.stderr.write(
+      `skill ${filePath}: name "${name}" 格式不规范（建议小写字母、数字、连字符）\n`,
+    );
+  }
+
+  return { name, description: fm.description, filePath };
+}
+
+function addSkill(skills: Map<string, Skill>, skill: Skill): void {
+  const existing = skills.get(skill.name);
+  if (existing) {
+    process.stderr.write(`skill "${skill.name}" 碰撞: ${existing.filePath} <- ${skill.filePath}\n`);
+  }
+  skills.set(skill.name, skill);
 }
 
 function parseFrontmatter(content: string): { name?: string; description?: string } {
@@ -393,20 +437,18 @@ function createSkillTool(skills: Skill[]) {
       const skill = index.get(name);
       if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
 
-      const dirPath = skill.dirPath;
-      const parts: string[] = [];
-      parts.push("=== SKILL.md ===\n");
-      parts.push(await readFile(join(dirPath, "SKILL.md"), "utf-8"));
+      const filePath = skill.filePath;
+      let content = await readFile(filePath, "utf-8");
 
-      const entries = await readdir(dirPath);
-      const mdFiles = entries.filter((e) => e.endsWith(".md") && e !== "SKILL.md").sort();
-      for (const file of mdFiles) {
-        const content = await readFile(join(dirPath, file), "utf-8");
-        parts.push(`\n=== ${file} ===\n`);
-        parts.push(content);
+      const dir = dirname(filePath);
+      const extra = (await readdir(dir))
+        .filter((f) => f.endsWith(".md") && f !== basename(filePath))
+        .sort();
+      for (const f of extra) {
+        content += `\n\n--- ${f} ---\n\n${await readFile(join(dir, f), "utf-8")}`;
       }
 
-      return parts.join("\n");
+      return content;
     },
   });
 }
