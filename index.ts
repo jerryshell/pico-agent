@@ -12,7 +12,7 @@ import { z } from "zod";
 const execAsync = promisify(exec);
 
 const viewImageStore: Array<{ mimeType: string; data: string }> = [];
-const MIME: Record<string, string> = {
+const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -170,42 +170,52 @@ async function runAgent(apiKey: string, prompt: string) {
 }
 
 async function extractImagesFromPrompt(
-  raw: string,
+  prompt: string,
 ): Promise<{ text: string; images: ImagePart[] }> {
   const IMAGE_RE = /([\w.\/\\-]+\.(?:png|jpg|jpeg|gif|webp))/gi;
   const cwd = process.cwd();
-  const seen = new Set<string>();
-  let resultText = raw;
-  const resultImages: ImagePart[] = [];
+  const loaded = new Set<string>();
+  const images: ImagePart[] = [];
 
-  for (const m of raw.matchAll(IMAGE_RE)) {
-    const name = m[1]!;
-    if (seen.has(name)) continue;
-    const resolved = join(cwd, name);
+  for (const match of prompt.matchAll(IMAGE_RE)) {
+    const filePath = match[1]!;
+    if (loaded.has(filePath)) continue;
+
     try {
-      await stat(resolved);
+      const fullPath = join(cwd, filePath);
+      const data = await readFile(fullPath);
+      const ext = filePath.toLowerCase().split(".").pop()!;
+      images.push({ type: "image", image: data.toString("base64"), mediaType: IMAGE_MIME[ext] });
+      loaded.add(filePath);
     } catch {
-      continue;
-    }
-    seen.add(name);
-    try {
-      const buf = await readFile(resolved);
-      const ext = name.toLowerCase().split(".").pop()!;
-      resultImages.push({ type: "image", image: buf.toString("base64"), mediaType: MIME[ext] });
-    } catch {
-      seen.delete(name);
+      // skip files that don't exist or can't be read
     }
   }
 
-  for (const name of seen) {
-    resultText = resultText.replaceAll(name, "");
+  let cleanText = prompt;
+  for (const filePath of loaded) {
+    cleanText = cleanText.replaceAll(filePath, "");
   }
-  resultText = resultText.trim();
 
-  return { text: resultText, images: resultImages };
+  return { text: cleanText.trim(), images };
 }
 
 // === tools ===
+
+function buildSkillsPrompt(skills: Skill[]): string | undefined {
+  if (skills.length === 0) return undefined;
+
+  return [
+    "你可以通过 skill 工具按需加载特定技能的详细内容（如技术参考、代码模板、库用法等）。",
+    "",
+    "可用技能：",
+    ...skills.map(
+      (skill) => `  - ${skill.name}${skill.description ? `: ${skill.description}` : ""}`,
+    ),
+    "",
+    "当用户请求涉及以上领域时，先调用 skill 工具加载对应内容，再按文档执行。",
+  ].join("\n");
+}
 
 function createTools() {
   const read = tool({
@@ -219,15 +229,15 @@ function createTools() {
         if (total <= MAX) return content;
 
         const lines = content.split("\n");
-        let buf = 0;
-        const take: string[] = [];
+        let bytes = 0;
+        const keptLines: string[] = [];
         for (const line of lines) {
-          const add = Buffer.byteLength(line + "\n", "utf-8");
-          if (buf + add > MAX) break;
-          take.push(line);
-          buf += add;
+          const lineBytes = Buffer.byteLength(line + "\n", "utf-8");
+          if (bytes + lineBytes > MAX) break;
+          keptLines.push(line);
+          bytes += lineBytes;
         }
-        return `${take.join("\n")}\n\n[输出截断：显示 ${(buf / 1024).toFixed(0)}KB / 共 ${(total / 1024).toFixed(0)}KB，剩余约 ${lines.length - take.length} 行]`;
+        return `${keptLines.join("\n")}\n\n[输出截断：显示 ${(bytes / 1024).toFixed(0)}KB / 共 ${(total / 1024).toFixed(0)}KB，剩余约 ${lines.length - keptLines.length} 行]`;
       } catch (error) {
         throw new Error(`无法读取文件 ${path}: ${error}`);
       }
@@ -302,8 +312,8 @@ function createTools() {
     ),
     execute: async ({ command, timeout }: { command: string; timeout?: number }) => {
       try {
-        const opts = timeout ? { timeout: timeout * 1000 } : undefined;
-        const { stdout, stderr } = await execAsync(command, opts);
+        const options = timeout ? { timeout: timeout * 1000 } : undefined;
+        const { stdout, stderr } = await execAsync(command, options);
         return String(stdout) + String(stderr);
       } catch (error: any) {
         const partial = String(error.stdout || "") + String(error.stderr || "");
@@ -318,9 +328,9 @@ function createTools() {
     inputSchema: zodSchema(z.object({ path: z.string().describe("图片文件路径") })),
     execute: async ({ path }: { path: string }) => {
       const ext = path.toLowerCase().split(".").pop()!;
-      if (!MIME[ext]) throw new Error(`不支持的图片格式: .${ext}`);
+      if (!IMAGE_MIME[ext]) throw new Error(`不支持的图片格式: .${ext}`);
       const buf = await readFile(path);
-      viewImageStore.push({ mimeType: MIME[ext], data: buf.toString("base64") });
+      viewImageStore.push({ mimeType: IMAGE_MIME[ext], data: buf.toString("base64") });
       return `已读取图片 ${basename(path)}`;
     },
   });
@@ -341,31 +351,16 @@ function createSkillTool(skills: Skill[]) {
       const dir = dirname(skill.filePath);
       let content = await readFile(skill.filePath, "utf-8");
 
-      const extra = (await readdir(dir))
-        .filter((f) => f.endsWith(".md") && f !== basename(skill.filePath))
+      const extraFiles = (await readdir(dir))
+        .filter((file) => file.endsWith(".md") && file !== basename(skill.filePath))
         .sort();
-      for (const f of extra) {
-        content += `\n\n--- ${f} ---\n\n${await readFile(join(dir, f), "utf-8")}`;
+      for (const file of extraFiles) {
+        content += `\n\n--- ${file} ---\n\n${await readFile(join(dir, file), "utf-8")}`;
       }
 
       return content;
     },
   });
-}
-
-function buildSkillsPrompt(skills: Skill[]): string | undefined {
-  if (skills.length === 0) return undefined;
-
-  return [
-    "你可以通过 skill 工具按需加载特定技能的详细内容（如技术参考、代码模板、库用法等）。",
-    "",
-    "可用技能：",
-    ...skills.map(
-      (skill) => `  - ${skill.name}${skill.description ? `: ${skill.description}` : ""}`,
-    ),
-    "",
-    "当用户请求涉及以上领域时，先调用 skill 工具加载对应内容，再按文档执行。",
-  ].join("\n");
 }
 
 // === output ===
@@ -460,8 +455,8 @@ function printChunk(chunk: TextStreamPart<any>) {
 
 function formatFinish(chunk: Extract<TextStreamPart<any>, { type: "finish" }>): string {
   const usage = chunk.totalUsage;
-  const parts: string[] = [bold("完成")];
-  if (chunk.finishReason) parts.push(`原因: ${chunk.finishReason}`);
+  const segments: string[] = [bold("完成")];
+  if (chunk.finishReason) segments.push(`原因: ${chunk.finishReason}`);
   if (usage) {
     const fmt = (n: number) =>
       n >= 1000000
@@ -469,11 +464,11 @@ function formatFinish(chunk: Extract<TextStreamPart<any>, { type: "finish" }>): 
         : n >= 1000
           ? `${(n / 1000).toFixed(1)}k`
           : String(n);
-    parts.push(`↑${fmt(usage.inputTokens ?? 0)}`);
-    parts.push(`↓${fmt(usage.outputTokens ?? 0)}`);
-    parts.push(`∑${fmt(usage.totalTokens ?? 0)}`);
+    segments.push(`↑${fmt(usage.inputTokens ?? 0)}`);
+    segments.push(`↓${fmt(usage.outputTokens ?? 0)}`);
+    segments.push(`∑${fmt(usage.totalTokens ?? 0)}`);
   }
-  return dim(parts.join(" | "));
+  return dim(segments.join(" | "));
 }
 
 // === skills ===
@@ -498,32 +493,32 @@ async function discoverIn(
   skills: Map<string, Skill>,
   rootLevel: boolean,
 ): Promise<void> {
-  let names: string[];
+  let entries: string[];
   try {
-    names = await readdir(dir);
+    entries = await readdir(dir);
   } catch {
     return;
   }
 
-  if (names.includes("SKILL.md")) {
+  if (entries.includes("SKILL.md")) {
     const skill = await loadSkill(join(dir, "SKILL.md"));
     if (skill) addSkill(skills, skill);
     return;
   }
 
-  for (const name of names.sort()) {
-    if (name.startsWith(".") || name === "node_modules") continue;
-    const fullPath = join(dir, name);
-    let stats;
+  for (const entry of entries.sort()) {
+    if (entry.startsWith(".") || entry === "node_modules") continue;
+    const fullPath = join(dir, entry);
+    let entryStats;
     try {
-      stats = await stat(fullPath);
+      entryStats = await stat(fullPath);
     } catch {
       continue;
     }
 
-    if (stats.isDirectory()) {
+    if (entryStats.isDirectory()) {
       await discoverIn(fullPath, skills, false);
-    } else if (rootLevel && name.endsWith(".md")) {
+    } else if (rootLevel && entry.endsWith(".md")) {
       const skill = await loadSkill(fullPath);
       if (skill) addSkill(skills, skill);
     }
@@ -578,14 +573,17 @@ function parseFrontmatter(content: string): { name?: string; description?: strin
     const isBlock = value === ">" || value === "|";
 
     if (isBlock) {
-      const parts: string[] = [];
+      const blockLines: string[] = [];
       i++;
       while (i < lines.length && (lines[i]!.startsWith(" ") || lines[i]!.startsWith("\t"))) {
-        parts.push(lines[i]!.trim());
+        blockLines.push(lines[i]!.trim());
         i++;
       }
       i--;
-      value = value === "|" ? parts.join("\n").trim() : parts.join(" ").replace(/\s+/g, " ").trim();
+      value =
+        value === "|"
+          ? blockLines.join("\n").trim()
+          : blockLines.join(" ").replace(/\s+/g, " ").trim();
     }
 
     if (key === "name") result.name = value;
