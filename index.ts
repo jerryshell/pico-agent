@@ -105,7 +105,7 @@ interface Skill {
 
 async function runAgent(apiKey: string, prompt: string) {
   const provider = createOpenAICompatible({
-    name: "Kimi For Coding",
+    name: "Kimi Code",
     apiKey,
     baseURL: "https://api.kimi.com/coding/v1",
   });

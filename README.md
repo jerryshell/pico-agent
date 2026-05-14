@@ -1,58 +1,46 @@
 # Pico Agent
 
-Pico 是一个轻量级 Agent，给 LLM 提供了 4 种工具：
+Pico 是一个轻量级 LLM Agent
 
-- `read` - 读取文件
-- `write` - 创建或重写文件
-- `edit` - 编辑文件
-- `bash` - 运行 shell 命令
+## 工具
 
-## 快速开始
+| 工具    | 说明                                         |
+| ------- | -------------------------------------------- |
+| `read`  | 读取文件（>50KB 自动截断）                   |
+| `write` | 创建或重写文件（自动创建父目录）             |
+| `edit`  | 编辑文件（支持单次多处编辑，oldText 须唯一） |
+| `bash`  | 运行 shell 命令（可设 timeout 防挂起）       |
+| `skill` | 按需加载技能详细内容（见下方技能系统）       |
 
-目前只适配了 Kimi Code 供应商
+## 技能系统
 
-### 1. 全局安装
+自动发现以下目录中的技能（SKILL.md 或 .md 文件）：
 
-```bash
-npm install -g @jerryshell/pico-agent
-```
+- `~/.agents/skills/` — 全局技能
+- `.agents/skills/` — 项目级技能
 
-### 2. 配置 API Key
+技能文件须含 YAML frontmatter 定义 `name` 和 `description`，LLM 通过 `skill` 工具按需加载。
+
+## 使用
+
+### Kimi Code
+
+适配 Kimi Code 供应商：
 
 ```bash
 pa config apiKey yourKimiCodeApiKey
 ```
 
-配置保存在 `~/.pico-agent/config.json`
-
-### 3. 运行
+配置保存在 `~/.pico-agent/config.json`。也可通过 `API_KEY` 环境变量临时指定。
 
 ```bash
 pa "简单总结我的系统状态"
 ```
 
-你也可以通过 `API_KEY` 环境变量临时指定：
-
-```bash
-API_KEY=xxx pa "简单总结我的系统状态"
-```
-
-## 开发环境
-
-安装依赖
+## 开发
 
 ```bash
 bun install
-```
-
-运行
-
-```bash
 bun run index.ts "简单总结我的系统状态"
-```
-
-构建
-
-```bash
-bun run build
+bun run build    # 输出到 dist/
 ```
