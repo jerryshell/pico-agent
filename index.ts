@@ -117,11 +117,25 @@ async function runAgent(apiKey: string, prompt: string) {
 
 function createTools() {
   const read = tool({
-    description: "读取文件内容",
+    description: "读取文件内容。超过 50KB 自动截断并提示剩余大小。",
     inputSchema: zodSchema(z.object({ path: z.string().describe("文件路径") })),
     execute: async ({ path }: { path: string }) => {
       try {
-        return await readFile(path, "utf-8");
+        const content = await readFile(path, "utf-8");
+        const total = Buffer.byteLength(content, "utf-8");
+        const MAX = 50 * 1024;
+        if (total <= MAX) return content;
+
+        const lines = content.split("\n");
+        let buf = 0;
+        const take: string[] = [];
+        for (const line of lines) {
+          const add = Buffer.byteLength(line + "\n", "utf-8");
+          if (buf + add > MAX) break;
+          take.push(line);
+          buf += add;
+        }
+        return `${take.join("\n")}\n\n[输出截断：显示 ${(buf / 1024).toFixed(0)}KB / 共 ${(total / 1024).toFixed(0)}KB，剩余约 ${lines.length - take.length} 行]`;
       } catch (error) {
         throw new Error(`无法读取文件 ${path}: ${error}`);
       }
@@ -129,7 +143,7 @@ function createTools() {
   });
 
   const write = tool({
-    description: "创建或重写文件",
+    description: "创建或重写文件。自动创建父目录。",
     inputSchema: zodSchema(
       z.object({
         path: z.string().describe("文件路径"),
@@ -138,8 +152,9 @@ function createTools() {
     ),
     execute: async ({ path, content }: { path: string; content: string }) => {
       try {
+        await mkdir(dirname(path), { recursive: true });
         await writeFile(path, content, "utf-8");
-        return `文件 ${path} 已写入`;
+        return `文件 ${path} 已写入（${Buffer.byteLength(content, "utf-8")} 字节）`;
       } catch (error) {
         throw new Error(`无法写入文件 ${path}: ${error}`);
       }
@@ -147,22 +162,38 @@ function createTools() {
   });
 
   const edit = tool({
-    description: "编辑文件（替换指定字符串）",
+    description: "编辑文件（支持单次多处编辑）。每项 edits[].oldText 必须在文件中唯一。",
     inputSchema: zodSchema(
       z.object({
         path: z.string().describe("文件路径"),
-        oldStr: z.string().describe("要替换的原始字符串"),
-        newStr: z.string().describe("替换后的新字符串"),
+        edits: z
+          .array(
+            z.object({
+              oldText: z.string().describe("原始字符串（须在文件中唯一）"),
+              newText: z.string().describe("替换后的字符串"),
+            }),
+          )
+          .describe("替换列表（按顺序逐项应用）"),
       }),
     ),
-    execute: async ({ path, oldStr, newStr }: { path: string; oldStr: string; newStr: string }) => {
+    execute: async ({
+      path,
+      edits,
+    }: {
+      path: string;
+      edits: { oldText: string; newText: string }[];
+    }) => {
       try {
-        const content = await readFile(path, "utf-8");
-        if (!content.includes(oldStr)) {
-          throw new Error(`文件 ${path} 中未找到要替换的字符串`);
+        let content = await readFile(path, "utf-8");
+        for (const { oldText, newText } of edits) {
+          const first = content.indexOf(oldText);
+          if (first === -1) throw new Error(`文件 ${path} 中未找到 "${oldText}"`);
+          if (content.indexOf(oldText, first + 1) !== -1)
+            throw new Error(`"${oldText}" 在文件中出现多次`);
+          content = content.replace(oldText, newText);
         }
-        await writeFile(path, content.replace(oldStr, newStr), "utf-8");
-        return `文件 ${path} 已更新`;
+        await writeFile(path, content, "utf-8");
+        return `文件 ${path} 已更新 (${edits.length} 处编辑)`;
       } catch (error) {
         throw new Error(`编辑文件失败: ${error}`);
       }
@@ -170,14 +201,22 @@ function createTools() {
   });
 
   const bash = tool({
-    description: "运行 shell 命令",
-    inputSchema: zodSchema(z.object({ command: z.string().describe("要执行的 shell 命令") })),
-    execute: async ({ command }: { command: string }) => {
+    description: "运行 shell 命令。可设 timeout（秒）防挂起。",
+    inputSchema: zodSchema(
+      z.object({
+        command: z.string().describe("要执行的 shell 命令"),
+        timeout: z.number().optional().describe("超时秒数"),
+      }),
+    ),
+    execute: async ({ command, timeout }: { command: string; timeout?: number }) => {
       try {
-        const { stdout, stderr } = await execAsync(command);
-        return stdout + stderr;
+        const opts = timeout ? { timeout: timeout * 1000 } : undefined;
+        const { stdout, stderr } = await execAsync(command, opts);
+        return String(stdout) + String(stderr);
       } catch (error: any) {
-        return `命令执行失败: ${error.message}`;
+        const partial = String(error.stdout || "") + String(error.stderr || "");
+        const suffix = partial ? "\n\n[以上为超时前的部分输出]" : "";
+        return `${partial}命令执行失败: ${error.message}${suffix}`;
       }
     },
   });
