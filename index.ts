@@ -16,7 +16,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const HOME_SKILLS_DIR = join(homedir(), ".agents", "skills");
 const LOCAL_SKILLS_DIR = join(process.cwd(), ".agents", "skills");
 
-// === 最高层 ===
+// === entry ===
 
 async function main() {
   const command = parseCommand();
@@ -40,8 +40,6 @@ async function main() {
 
   await runAgent(apiKey, command.prompt);
 }
-
-// === 命令解析 ===
 
 function parseCommand() {
   const { positionals } = parseArgs({
@@ -69,8 +67,6 @@ function parseCommand() {
   };
 }
 
-// === apiKey 解析 ===
-
 async function resolveApiKey(): Promise<string | undefined> {
   const envKey = process.env.API_KEY;
   if (envKey) return envKey;
@@ -79,7 +75,33 @@ async function resolveApiKey(): Promise<string | undefined> {
   return fileConfig.apiKey;
 }
 
-// === Agent 运行 ===
+// === config ===
+
+interface Config {
+  apiKey?: string;
+}
+
+async function loadConfig(): Promise<Config> {
+  try {
+    const content = await readFile(CONFIG_FILE, "utf-8");
+    return JSON.parse(content) as Config;
+  } catch {
+    return {};
+  }
+}
+
+async function saveConfig(config: Config): Promise<void> {
+  await mkdir(CONFIG_DIR, { recursive: true });
+  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
+}
+
+// === agent ===
+
+interface Skill {
+  name: string;
+  description: string;
+  filePath: string;
+}
 
 async function runAgent(apiKey: string, prompt: string) {
   const provider = createOpenAICompatible({
@@ -113,7 +135,7 @@ async function runAgent(apiKey: string, prompt: string) {
   }
 }
 
-// === 工具 ===
+// === tools ===
 
 function createTools() {
   const read = tool({
@@ -224,7 +246,47 @@ function createTools() {
   return { read, write, edit, bash };
 }
 
-// === Chunk 输出 ===
+function createSkillTool(skills: Skill[]) {
+  const index = new Map(skills.map((s) => [s.name, s]));
+
+  return tool({
+    description: "加载指定技能的详细内容",
+    inputSchema: zodSchema(z.object({ name: z.string().describe("技能名称") })),
+    execute: async ({ name }: { name: string }) => {
+      const skill = index.get(name);
+      if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
+
+      const dir = dirname(skill.filePath);
+      let content = await readFile(skill.filePath, "utf-8");
+
+      const extra = (await readdir(dir))
+        .filter((f) => f.endsWith(".md") && f !== basename(skill.filePath))
+        .sort();
+      for (const f of extra) {
+        content += `\n\n--- ${f} ---\n\n${await readFile(join(dir, f), "utf-8")}`;
+      }
+
+      return content;
+    },
+  });
+}
+
+function buildSkillsPrompt(skills: Skill[]): string | undefined {
+  if (skills.length === 0) return undefined;
+
+  return [
+    "你可以通过 skill 工具按需加载特定技能的详细内容（如技术参考、代码模板、库用法等）。",
+    "",
+    "可用技能：",
+    ...skills.map(
+      (skill) => `  - ${skill.name}${skill.description ? `: ${skill.description}` : ""}`,
+    ),
+    "",
+    "当用户请求涉及以上领域时，先调用 skill 工具加载对应内容，再按文档执行。",
+  ].join("\n");
+}
+
+// === output ===
 
 function printChunk(chunk: TextStreamPart<any>) {
   switch (chunk.type) {
@@ -304,50 +366,24 @@ function printChunk(chunk: TextStreamPart<any>) {
 }
 
 function formatFinish(chunk: Extract<TextStreamPart<any>, { type: "finish" }>): string {
-  const u = chunk.totalUsage;
+  const usage = chunk.totalUsage;
   const parts: string[] = [bold("完成")];
   if (chunk.finishReason) parts.push(`原因: ${chunk.finishReason}`);
-  if (u) {
-    const f = (n: number) =>
+  if (usage) {
+    const fmt = (n: number) =>
       n >= 1000000
         ? `${(n / 1000000).toFixed(1)}M`
         : n >= 1000
           ? `${(n / 1000).toFixed(1)}k`
           : String(n);
-    parts.push(`↑${f(u.inputTokens ?? 0)}`);
-    parts.push(`↓${f(u.outputTokens ?? 0)}`);
-    parts.push(`∑${f(u.totalTokens ?? 0)}`);
+    parts.push(`↑${fmt(usage.inputTokens ?? 0)}`);
+    parts.push(`↓${fmt(usage.outputTokens ?? 0)}`);
+    parts.push(`∑${fmt(usage.totalTokens ?? 0)}`);
   }
   return parts.join(" | ");
 }
 
-// === 配置读写 ===
-
-interface Config {
-  apiKey?: string;
-}
-
-async function loadConfig(): Promise<Config> {
-  try {
-    const content = await readFile(CONFIG_FILE, "utf-8");
-    return JSON.parse(content) as Config;
-  } catch {
-    return {};
-  }
-}
-
-async function saveConfig(config: Config): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
-}
-
-// === Skill 自动发现 ===
-
-interface Skill {
-  name: string;
-  description: string;
-  filePath: string;
-}
+// === skills ===
 
 async function discoverSkills(): Promise<Skill[]> {
   const skills = new Map<string, Skill>();
@@ -377,26 +413,26 @@ async function discoverIn(
   }
 
   if (names.includes("SKILL.md")) {
-    const s = await loadSkill(join(dir, "SKILL.md"));
-    if (s) addSkill(skills, s);
+    const skill = await loadSkill(join(dir, "SKILL.md"));
+    if (skill) addSkill(skills, skill);
     return;
   }
 
   for (const name of names.sort()) {
     if (name.startsWith(".") || name === "node_modules") continue;
-    const fp = join(dir, name);
-    let st;
+    const fullPath = join(dir, name);
+    let stats;
     try {
-      st = await stat(fp);
+      stats = await stat(fullPath);
     } catch {
       continue;
     }
 
-    if (st.isDirectory()) {
-      await discoverIn(fp, skills, false);
+    if (stats.isDirectory()) {
+      await discoverIn(fullPath, skills, false);
     } else if (rootLevel && name.endsWith(".md")) {
-      const s = await loadSkill(fp);
-      if (s) addSkill(skills, s);
+      const skill = await loadSkill(fullPath);
+      if (skill) addSkill(skills, skill);
     }
   }
 }
@@ -409,10 +445,10 @@ async function loadSkill(filePath: string): Promise<Skill | null> {
     return null;
   }
 
-  const fm = parseFrontmatter(content);
-  const name = fm.name || basename(dirname(filePath));
+  const frontmatter = parseFrontmatter(content);
+  const name = frontmatter.name || basename(dirname(filePath));
 
-  if (!fm.description || !fm.description.trim()) {
+  if (!frontmatter.description || !frontmatter.description.trim()) {
     process.stderr.write(`skill ${filePath}: description 为空，跳过\n`);
     return null;
   }
@@ -422,7 +458,7 @@ async function loadSkill(filePath: string): Promise<Skill | null> {
     );
   }
 
-  return { name, description: fm.description, filePath };
+  return { name, description: frontmatter.description, filePath };
 }
 
 function addSkill(skills: Map<string, Skill>, skill: Skill): void {
@@ -466,52 +502,11 @@ function parseFrontmatter(content: string): { name?: string; description?: strin
   return result;
 }
 
-function buildSkillsPrompt(skills: Skill[]): string | undefined {
-  if (skills.length === 0) return undefined;
-
-  return [
-    "你可以通过 skill 工具按需加载特定技能的详细内容（如技术参考、代码模板、库用法等）。",
-    "",
-    "可用技能：",
-    ...skills.map(
-      (skill) => `  - ${skill.name}${skill.description ? `: ${skill.description}` : ""}`,
-    ),
-    "",
-    "当用户请求涉及以上领域时，先调用 skill 工具加载对应内容，再按文档执行。",
-  ].join("\n");
-}
-
-function createSkillTool(skills: Skill[]) {
-  const index = new Map(skills.map((s) => [s.name, s]));
-
-  return tool({
-    description: "加载指定技能的详细内容",
-    inputSchema: zodSchema(z.object({ name: z.string().describe("技能名称") })),
-    execute: async ({ name }: { name: string }) => {
-      const skill = index.get(name);
-      if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
-
-      const filePath = skill.filePath;
-      let content = await readFile(filePath, "utf-8");
-
-      const dir = dirname(filePath);
-      const extra = (await readdir(dir))
-        .filter((f) => f.endsWith(".md") && f !== basename(filePath))
-        .sort();
-      for (const f of extra) {
-        content += `\n\n--- ${f} ---\n\n${await readFile(join(dir, f), "utf-8")}`;
-      }
-
-      return content;
-    },
-  });
-}
-
-// === 视觉与输出辅助 ===
+// === styling ===
 
 const noColor = !process.stdout.isTTY || !!process.env.NO_COLOR;
 const style = (open: string, close: string) =>
-  noColor ? (s: string) => s : (s: string) => `${open}${s}${close}`;
+  noColor ? (text: string) => text : (text: string) => `${open}${text}${close}`;
 const dim = style("\x1b[2m", "\x1b[22m");
 const cyan = style("\x1b[36m", "\x1b[39m");
 const green = style("\x1b[32m", "\x1b[39m");
