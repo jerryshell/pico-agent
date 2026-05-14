@@ -401,26 +401,26 @@ function printChunk(chunk: TextStreamPart<any>) {
     // ── tool interaction (stderr) ──
     case "tool-call":
       open(`${cyan(bold("工具调用"))} ${cyan(chunk.toolName)}`);
-      log(`  ${cyan(JSON.stringify(chunk.input))}`);
+      log(cyan(JSON.stringify(chunk.input)));
       break;
     case "tool-result": {
-      log(` ${green(bold("工具结果"))} ${green(chunk.toolName)}`);
+      log(`${green(bold("工具结果"))} ${green(chunk.toolName)}`);
       const output =
         typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output);
       for (const line of output.split("\n")) {
-        log(`  ${green(line)}`);
+        log(green(line));
       }
       break;
     }
     case "tool-error":
-      log(` ${red(bold("工具错误"))} ${red(chunk.toolName)}`);
-      log(`  ${red(String(chunk.error))}`);
+      log(`${red(bold("工具错误"))} ${red(chunk.toolName)}`);
+      log(red(String(chunk.error)));
       break;
     case "tool-output-denied":
-      log(` ${yellow(bold("输出被拒绝"))} ${yellow(chunk.toolName)}`);
+      log(`${yellow(bold("输出被拒绝"))} ${yellow(chunk.toolName)}`);
       break;
     case "tool-approval-request":
-      log(` ${magenta(bold("等待审批"))} ${magenta(chunk.toolCall.toolName)}`);
+      log(`${magenta(bold("等待审批"))} ${magenta(chunk.toolCall.toolName)}`);
       break;
 
     // ── step lifecycle (stderr) ──
