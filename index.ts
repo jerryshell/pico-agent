@@ -172,7 +172,7 @@ async function runAgent(apiKey: string, prompt: string) {
 async function extractImagesFromPrompt(
   prompt: string,
 ): Promise<{ text: string; images: ImagePart[] }> {
-  const IMAGE_RE = /([\w.\/\\-]+\.(?:png|jpg|jpeg|gif|webp))/gi;
+  const IMAGE_RE = /([\w./\\-]+\.(?:png|jpg|jpeg|gif|webp))/gi;
   const cwd = process.cwd();
   const loaded = new Set<string>();
   const images: ImagePart[] = [];
