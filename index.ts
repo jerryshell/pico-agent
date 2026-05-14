@@ -392,7 +392,21 @@ function createSkillTool(skills: Skill[]) {
     execute: async ({ name }: { name: string }) => {
       const skill = index.get(name);
       if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
-      return await readFile(join(skill.dirPath, "SKILL.md"), "utf-8");
+
+      const dirPath = skill.dirPath;
+      const parts: string[] = [];
+      parts.push("=== SKILL.md ===\n");
+      parts.push(await readFile(join(dirPath, "SKILL.md"), "utf-8"));
+
+      const entries = await readdir(dirPath);
+      const mdFiles = entries.filter((e) => e.endsWith(".md") && e !== "SKILL.md").sort();
+      for (const file of mdFiles) {
+        const content = await readFile(join(dirPath, file), "utf-8");
+        parts.push(`\n=== ${file} ===\n`);
+        parts.push(content);
+      }
+
+      return parts.join("\n");
     },
   });
 }
