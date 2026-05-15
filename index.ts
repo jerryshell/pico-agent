@@ -11,8 +11,6 @@ import { z } from "zod";
 
 const execAsync = promisify(exec);
 
-const viewImageStore: Buffer[] = [];
-
 const CONFIG_DIR = join(homedir(), ".pico-agent");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const HOME_SKILLS_DIR = join(homedir(), ".agents", "skills");
@@ -382,11 +380,10 @@ const bash = tool({
 });
 
 const view = tool({
-  description: "读取文件并发送给模型查看",
+  description: "指定文件路径，将在下一步发送给模型查看",
   inputSchema: z.object({ path: z.string().describe("文件路径") }),
   execute: async ({ path }: { path: string }) => {
-    viewImageStore.push(await readFile(path));
-    return `已读取文件 ${basename(path)}`;
+    return path;
   },
 });
 
@@ -514,18 +511,22 @@ async function runAgent(apiKey: string, prompt: string) {
     instructions: buildSkillsPrompt(skills),
     tools,
     stopWhen: isLoopFinished(),
-    prepareStep: async ({ messages }) => {
-      if (viewImageStore.length === 0) return;
+    prepareStep: async ({ steps, messages }) => {
+      const lastStep = steps.at(-1);
+      if (!lastStep) return;
+      const images: Buffer[] = [];
+      for (const r of lastStep.toolResults) {
+        if (r.toolName === "view" && typeof r.output === "string") {
+          try {
+            images.push(await readFile(r.output));
+          } catch {}
+        }
+      }
+      if (images.length === 0) return;
       return {
         messages: [
           ...messages,
-          {
-            role: "user",
-            content: viewImageStore.splice(0).map((buf) => ({
-              type: "image" as const,
-              image: buf,
-            })),
-          },
+          { role: "user", content: images.map((buf) => ({ type: "image" as const, image: buf })) },
         ],
       };
     },
