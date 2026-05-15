@@ -1,12 +1,6 @@
 # Pico Agent
 
-Pico 是一个轻量级 LLM Agent
-
-```bash
-npm install -g @jerryshell/pico-agent
-```
-
-## 工具
+Pico 是一个轻量级 LLM Agent，内置了以下工具
 
 | 工具    | 说明            |
 | ------- | --------------- |
@@ -17,11 +11,20 @@ npm install -g @jerryshell/pico-agent
 | `view`  | 查看图片        |
 | `skill` | 按需加载技能    |
 
-## 技能系统
+Pico 会从以下目录按需加载技能
 
-在 `~/.agents/skills/` 或 `.agents/skills/` 中按 `SKILL.md` 格式编写，LLM 通过 `skill` 工具按需加载。
+- `~/.agents/skills/`
+- `./.agents/skills/`
 
-## 使用
+## 快速开始
+
+1. 全局安装
+
+```bash
+npm install -g @jerryshell/pico-agent
+```
+
+2. 配置 Kimi Code API Key
 
 ```bash
 pa config apiKey yourKimiCodeApiKey
@@ -29,19 +32,8 @@ pa config apiKey yourKimiCodeApiKey
 
 配置保存在 `~/.pico-agent/config.json`。也可通过 `API_KEY` 环境变量指定。
 
+3. 运行
+
 ```bash
 pa "简单总结我的系统状态"
-```
-
-### 环境变量
-
-- `API_KEY` — API 密钥（优先级高于配置文件）
-- `NO_COLOR` — 禁用彩色输出
-
-## 开发
-
-```bash
-bun install
-bun run index.ts "简单总结我的系统状态"
-bun run build    # 输出到 dist/
 ```
