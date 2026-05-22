@@ -54,20 +54,24 @@ async function main() {
   await runAgent(apiKey, command.prompt);
 }
 
+function parseConfigCommand(positionals: string[]) {
+  if (positionals[0] !== "config") return null;
+  const [, key, value] = positionals;
+  if (key === "apiKey" && value) {
+    return { mode: "config" as const, key, value };
+  }
+  console.error("用法: pa config apiKey yourKimiCodeApiKey");
+  process.exit(1);
+}
+
 function parseCommand() {
   const { positionals } = parseArgs({
     strict: false,
     allowPositionals: true,
   });
 
-  if (positionals[0] === "config") {
-    const [, key, value] = positionals;
-    if (key === "apiKey" && value) {
-      return { mode: "config" as const, key, value };
-    }
-    console.error("用法: pa config apiKey yourKimiCodeApiKey");
-    process.exit(1);
-  }
+  const config = parseConfigCommand(positionals);
+  if (config) return config;
 
   if (positionals.length === 0) {
     console.error("用法: pa <prompt>");
@@ -116,40 +120,69 @@ interface Skill {
   filePath: string;
 }
 
+function isIndented(line: string): boolean {
+  return line.startsWith(" ") || line.startsWith("\t");
+}
+
+function readBlockScalar(
+  lines: string[],
+  startIndex: number,
+  indicator: string,
+): { value: string; newIndex: number } {
+  const blockLines: string[] = [];
+  let i = startIndex;
+  while (i < lines.length && isIndented(lines[i]!)) {
+    blockLines.push(lines[i]!.trim());
+    i++;
+  }
+  const value =
+    indicator === "|"
+      ? blockLines.join("\n").trim()
+      : blockLines.join(" ").replace(/\s+/g, " ").trim();
+  return { value, newIndex: i - 1 };
+}
+
+function parseFrontmatterLine(
+  lines: string[],
+  index: number,
+): { key?: string; value?: string; newIndex: number } {
+  const header = lines[index]!.match(/^(\w+):\s*(.*)$/);
+  if (!header) return { newIndex: index };
+
+  const key = header[1]!;
+  let value = header[2]!;
+  if (value === ">" || value === "|") {
+    const block = readBlockScalar(lines, index + 1, value);
+    return { key, value: block.value, newIndex: block.newIndex };
+  }
+  return { key, value, newIndex: index };
+}
+
+function assignFrontmatterField(
+  result: { name?: string; description?: string },
+  key: string,
+  value?: string,
+): void {
+  if (key === "name") result.name = value;
+  else if (key === "description") result.description = value;
+}
+
+function buildFrontmatterResult(lines: string[]): { name?: string; description?: string } {
+  const result: { name?: string; description?: string } = {};
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseFrontmatterLine(lines, i);
+    if (parsed.key) {
+      i = parsed.newIndex;
+      assignFrontmatterField(result, parsed.key, parsed.value);
+    }
+  }
+  return result;
+}
+
 function parseFrontmatter(content: string): { name?: string; description?: string } {
   const match = content.match(/^---\n([\s\S]*?)---\n/);
   if (!match) return {};
-
-  const lines = match[1]!.split("\n");
-  const result: { name?: string; description?: string } = {};
-
-  for (let i = 0; i < lines.length; i++) {
-    const header = lines[i]!.match(/^(\w+):\s*(.*)$/);
-    if (!header) continue;
-
-    const key = header[1]!;
-    let value = header[2]!;
-    const isBlock = value === ">" || value === "|";
-
-    if (isBlock) {
-      const blockLines: string[] = [];
-      i++;
-      while (i < lines.length && (lines[i]!.startsWith(" ") || lines[i]!.startsWith("\t"))) {
-        blockLines.push(lines[i]!.trim());
-        i++;
-      }
-      i--;
-      value =
-        value === "|"
-          ? blockLines.join("\n").trim()
-          : blockLines.join(" ").replace(/\s+/g, " ").trim();
-    }
-
-    if (key === "name") result.name = value;
-    else if (key === "description") result.description = value;
-  }
-
-  return result;
+  return buildFrontmatterResult(match[1]!.split("\n"));
 }
 
 function addSkill(skills: Map<string, Skill>, skill: Skill): void {
@@ -158,6 +191,19 @@ function addSkill(skills: Map<string, Skill>, skill: Skill): void {
     process.stderr.write(`skill "${skill.name}" 碰撞: ${existing.filePath} <- ${skill.filePath}\n`);
   }
   skills.set(skill.name, skill);
+}
+
+function validateSkill(name: string, description: string | undefined, filePath: string): boolean {
+  if (!description || !description.trim()) {
+    process.stderr.write(`skill ${filePath}: description 为空，跳过\n`);
+    return false;
+  }
+  if (!/^[a-z0-9-]+$/.test(name)) {
+    process.stderr.write(
+      `skill ${filePath}: name "${name}" 格式不规范（建议小写字母、数字、连字符）\n`,
+    );
+  }
+  return true;
 }
 
 async function loadSkill(filePath: string): Promise<Skill | null> {
@@ -171,17 +217,57 @@ async function loadSkill(filePath: string): Promise<Skill | null> {
   const frontmatter = parseFrontmatter(content);
   const name = frontmatter.name || basename(dirname(filePath));
 
-  if (!frontmatter.description || !frontmatter.description.trim()) {
-    process.stderr.write(`skill ${filePath}: description 为空，跳过\n`);
+  if (!validateSkill(name, frontmatter.description, filePath)) return null;
+
+  return { name, description: frontmatter.description!, filePath };
+}
+
+async function safeReadDir(dir: string): Promise<string[] | null> {
+  try {
+    return await readdir(dir);
+  } catch {
     return null;
   }
-  if (!/^[a-z0-9-]+$/.test(name)) {
-    process.stderr.write(
-      `skill ${filePath}: name "${name}" 格式不规范（建议小写字母、数字、连字符）\n`,
-    );
+}
+
+async function tryAddSkill(filePath: string, skills: Map<string, Skill>): Promise<void> {
+  const skill = await loadSkill(filePath);
+  if (skill) addSkill(skills, skill);
+}
+
+async function safeStat(path: string) {
+  try {
+    return await stat(path);
+  } catch {
+    return null;
+  }
+}
+
+function isVisibleEntry(entry: string): boolean {
+  return !entry.startsWith(".") && entry !== "node_modules";
+}
+
+function shouldLoadSkill(entry: string, rootLevel: boolean): boolean {
+  return rootLevel && entry.endsWith(".md");
+}
+
+async function processDirectoryEntry(
+  fullPath: string,
+  entry: string,
+  skills: Map<string, Skill>,
+  rootLevel: boolean,
+): Promise<void> {
+  const entryStats = await safeStat(fullPath);
+  if (!entryStats) return;
+
+  if (entryStats.isDirectory()) {
+    await discoverIn(fullPath, skills, false);
+    return;
   }
 
-  return { name, description: frontmatter.description, filePath };
+  if (shouldLoadSkill(entry, rootLevel)) {
+    await tryAddSkill(fullPath, skills);
+  }
 }
 
 async function discoverIn(
@@ -189,35 +275,17 @@ async function discoverIn(
   skills: Map<string, Skill>,
   rootLevel: boolean,
 ): Promise<void> {
-  let entries: string[];
-  try {
-    entries = await readdir(dir);
-  } catch {
-    return;
-  }
+  const entries = await safeReadDir(dir);
+  if (!entries) return;
 
   if (entries.includes("SKILL.md")) {
-    const skill = await loadSkill(join(dir, "SKILL.md"));
-    if (skill) addSkill(skills, skill);
+    await tryAddSkill(join(dir, "SKILL.md"), skills);
     return;
   }
 
-  for (const entry of entries.sort()) {
-    if (entry.startsWith(".") || entry === "node_modules") continue;
-    const fullPath = join(dir, entry);
-    let entryStats;
-    try {
-      entryStats = await stat(fullPath);
-    } catch {
-      continue;
-    }
-
-    if (entryStats.isDirectory()) {
-      await discoverIn(fullPath, skills, false);
-    } else if (rootLevel && entry.endsWith(".md")) {
-      const skill = await loadSkill(fullPath);
-      if (skill) addSkill(skills, skill);
-    }
+  const visible = entries.filter(isVisibleEntry).sort();
+  for (const entry of visible) {
+    await processDirectoryEntry(join(dir, entry), entry, skills, rootLevel);
   }
 }
 
@@ -253,6 +321,20 @@ function buildSkillsPrompt(skills: Skill[]): string | undefined {
   ].join("\n");
 }
 
+async function buildSkillContent(skill: Skill): Promise<string> {
+  const dir = dirname(skill.filePath);
+  let content = await readFile(skill.filePath, "utf-8");
+
+  const extraFiles = (await readdir(dir))
+    .filter((file) => file.endsWith(".md") && file !== basename(skill.filePath))
+    .sort();
+  for (const file of extraFiles) {
+    content += `\n\n--- ${file} ---\n\n${await readFile(join(dir, file), "utf-8")}`;
+  }
+
+  return content;
+}
+
 function createSkillTool(skills: Skill[]) {
   const index = new Map(skills.map((s) => [s.name, s]));
 
@@ -263,22 +345,28 @@ function createSkillTool(skills: Skill[]) {
       const skill = index.get(name);
       if (!skill) throw new Error(`未知技能 "${name}"，可用: ${[...index.keys()].join(", ")}`);
 
-      const dir = dirname(skill.filePath);
-      let content = await readFile(skill.filePath, "utf-8");
-
-      const extraFiles = (await readdir(dir))
-        .filter((file) => file.endsWith(".md") && file !== basename(skill.filePath))
-        .sort();
-      for (const file of extraFiles) {
-        content += `\n\n--- ${file} ---\n\n${await readFile(join(dir, file), "utf-8")}`;
-      }
-
-      return content;
+      return buildSkillContent(skill);
     },
   });
 }
 
 // tool definitions
+
+function truncateContent(content: string, maxBytes: number): string {
+  const total = Buffer.byteLength(content, "utf-8");
+  if (total <= maxBytes) return content;
+
+  const lines = content.split("\n");
+  let bytes = 0;
+  const keptLines: string[] = [];
+  for (const line of lines) {
+    const lineBytes = Buffer.byteLength(line + "\n", "utf-8");
+    if (bytes + lineBytes > maxBytes) break;
+    keptLines.push(line);
+    bytes += lineBytes;
+  }
+  return `${keptLines.join("\n")}\n\n[输出截断：显示 ${(bytes / 1024).toFixed(0)}KB / 共 ${(total / 1024).toFixed(0)}KB，剩余约 ${lines.length - keptLines.length} 行]`;
+}
 
 const read = tool({
   description: "读取文件内容。超过 50KB 自动截断并提示剩余大小。",
@@ -286,20 +374,7 @@ const read = tool({
   execute: async ({ path }: { path: string }) => {
     try {
       const content = await readFile(path, "utf-8");
-      const total = Buffer.byteLength(content, "utf-8");
-      const MAX = 50 * 1024;
-      if (total <= MAX) return content;
-
-      const lines = content.split("\n");
-      let bytes = 0;
-      const keptLines: string[] = [];
-      for (const line of lines) {
-        const lineBytes = Buffer.byteLength(line + "\n", "utf-8");
-        if (bytes + lineBytes > MAX) break;
-        keptLines.push(line);
-        bytes += lineBytes;
-      }
-      return `${keptLines.join("\n")}\n\n[输出截断：显示 ${(bytes / 1024).toFixed(0)}KB / 共 ${(total / 1024).toFixed(0)}KB，剩余约 ${lines.length - keptLines.length} 行]`;
+      return truncateContent(content, 50 * 1024);
     } catch (error) {
       throw new Error(`无法读取文件 ${path}: ${error}`);
     }
@@ -322,6 +397,13 @@ const write = tool({
     }
   },
 });
+
+function applyEdit(content: string, oldText: string, newText: string, path: string): string {
+  const first = content.indexOf(oldText);
+  if (first === -1) throw new Error(`文件 ${path} 中未找到 "${oldText}"`);
+  if (content.indexOf(oldText, first + 1) !== -1) throw new Error(`"${oldText}" 在文件中出现多次`);
+  return content.replace(oldText, newText);
+}
 
 const edit = tool({
   description: "编辑文件（支持单次多处编辑）。每项 edits[].oldText 必须在文件中唯一。",
@@ -346,11 +428,7 @@ const edit = tool({
     try {
       let content = await readFile(path, "utf-8");
       for (const { oldText, newText } of edits) {
-        const first = content.indexOf(oldText);
-        if (first === -1) throw new Error(`文件 ${path} 中未找到 "${oldText}"`);
-        if (content.indexOf(oldText, first + 1) !== -1)
-          throw new Error(`"${oldText}" 在文件中出现多次`);
-        content = content.replace(oldText, newText);
+        content = applyEdit(content, oldText, newText, path);
       }
       await writeFile(path, content, "utf-8");
       return `文件 ${path} 已更新 (${edits.length} 处编辑)`;
@@ -359,6 +437,12 @@ const edit = tool({
     }
   },
 });
+
+function formatExecError(error: any): string {
+  const partial = String(error.stdout || "") + String(error.stderr || "");
+  const suffix = partial ? "\n\n[以上为超时前的部分输出]" : "";
+  return `${partial}命令执行失败: ${error.message}${suffix}`;
+}
 
 const bash = tool({
   description: "运行 shell 命令。可设 timeout（秒）防挂起。",
@@ -372,9 +456,7 @@ const bash = tool({
       const { stdout, stderr } = await execAsync(command, options);
       return String(stdout) + String(stderr);
     } catch (error: any) {
-      const partial = String(error.stdout || "") + String(error.stderr || "");
-      const suffix = partial ? "\n\n[以上为超时前的部分输出]" : "";
-      return `${partial}命令执行失败: ${error.message}${suffix}`;
+      return formatExecError(error);
     }
   },
 });
@@ -399,94 +481,79 @@ function open(title: string) {
   log(title);
 }
 
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 function formatFinish(chunk: Extract<TextStreamPart<any>, { type: "finish" }>): string {
   const usage = chunk.totalUsage;
   const segments: string[] = [bold("完成")];
   if (chunk.finishReason) segments.push(`原因: ${chunk.finishReason}`);
   if (usage) {
-    const fmt = (n: number) =>
-      n >= 1000000
-        ? `${(n / 1000000).toFixed(1)}M`
-        : n >= 1000
-          ? `${(n / 1000).toFixed(1)}k`
-          : String(n);
-    segments.push(`↑${fmt(usage.inputTokens ?? 0)}`);
-    segments.push(`↓${fmt(usage.outputTokens ?? 0)}`);
-    segments.push(`∑${fmt(usage.totalTokens ?? 0)}`);
+    const { inputTokens = 0, outputTokens = 0, totalTokens = 0 } = usage;
+    segments.push(`↑${formatTokenCount(inputTokens)}`);
+    segments.push(`↓${formatTokenCount(outputTokens)}`);
+    segments.push(`∑${formatTokenCount(totalTokens)}`);
   }
   return dim(segments.join(" | "));
 }
 
-function printChunk(chunk: TextStreamPart<any>) {
-  switch (chunk.type) {
-    case "text-delta":
-      process.stdout.write(chunk.text);
-      break;
-    case "text-start":
-    case "text-end":
-      process.stdout.write("\n");
-      break;
-    case "reasoning-start":
-      open(yellow(bold("思考")));
-      break;
-    case "reasoning-delta":
-      process.stdout.write(yellow(chunk.text));
-      break;
-    case "reasoning-end":
-      process.stdout.write("\n");
-      break;
-    case "tool-call":
-      open(`${cyan(bold("工具调用"))} ${cyan(chunk.toolName)}`);
-      log(cyan(JSON.stringify(chunk.input)));
-      break;
-    case "tool-result": {
-      log(`${green(bold("工具结果"))} ${green(chunk.toolName)}`);
-      const output = typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output);
-      for (const line of output.split("\n")) {
-        log(green(line));
-      }
-      break;
+const chunkHandlers: Record<string, (chunk: any) => void> = {
+  "text-delta": (c) => process.stdout.write(c.text),
+  "text-start": () => process.stdout.write("\n"),
+  "text-end": () => process.stdout.write("\n"),
+  "reasoning-start": () => open(yellow(bold("思考"))),
+  "reasoning-delta": (c) => process.stdout.write(yellow(c.text)),
+  "reasoning-end": () => process.stdout.write("\n"),
+  "tool-call": (c) => {
+    open(`${cyan(bold("工具调用"))} ${cyan(c.toolName)}`);
+    log(cyan(JSON.stringify(c.input)));
+  },
+  "tool-result": (c) => {
+    log(`${green(bold("工具结果"))} ${green(c.toolName)}`);
+    const output = typeof c.output === "string" ? c.output : JSON.stringify(c.output);
+    for (const line of output.split("\n")) {
+      log(green(line));
     }
-    case "tool-error":
-      log(`${red(bold("工具错误"))} ${red(chunk.toolName)}`);
-      log(red(String(chunk.error)));
-      break;
-    case "tool-output-denied":
-      log(`${yellow(bold("输出被拒绝"))} ${yellow(chunk.toolName)}`);
-      break;
-    case "tool-approval-request":
-      log(`${magenta(bold("等待审批"))} ${magenta(chunk.toolCall.toolName)}`);
-      break;
-    case "start-step":
-      open(bold("步骤开始"));
-      break;
-    case "finish-step":
-      log(dim(`步骤结束 | ${chunk.finishReason}`));
-      break;
-    case "start":
-      log(bold("开始"));
-      break;
-    case "finish":
-      log(formatFinish(chunk));
-      break;
-    case "abort":
-      log(`${red(bold("中断"))}${chunk.reason ? `: ${chunk.reason}` : ""}`);
-      break;
-    case "error":
-      log(`${red(bold("错误"))}: ${String(chunk.error)}`);
-      break;
-    case "source":
-      log(`${dim("[来源]")} ${dim(chunk.sourceType === "url" ? chunk.url : chunk.title)}`);
-      break;
-    case "file":
-      log(`${blue(bold("文件"))} ${blue(chunk.file.mediaType)}`);
-      break;
-    default:
-      break;
-  }
+  },
+  "tool-error": (c) => {
+    log(`${red(bold("工具错误"))} ${red(c.toolName)}`);
+    log(red(String(c.error)));
+  },
+  "tool-output-denied": (c) => log(`${yellow(bold("输出被拒绝"))} ${yellow(c.toolName)}`),
+  "tool-approval-request": (c) =>
+    log(`${magenta(bold("等待审批"))} ${magenta(c.toolCall.toolName)}`),
+  "start-step": () => open(bold("步骤开始")),
+  "finish-step": (c) => log(dim(`步骤结束 | ${c.finishReason}`)),
+  start: () => log(bold("开始")),
+  finish: (c) => log(formatFinish(c)),
+  abort: (c) => log(`${red(bold("中断"))}${c.reason ? `: ${c.reason}` : ""}`),
+  error: (c) => log(`${red(bold("错误"))}: ${String(c.error)}`),
+  source: (c) => log(`${dim("[来源]")} ${dim(c.sourceType === "url" ? c.url : c.title)}`),
+  file: (c) => log(`${blue(bold("文件"))} ${blue(c.file.mediaType)}`),
+};
+
+function printChunk(chunk: TextStreamPart<any>) {
+  const handler = chunkHandlers[chunk.type];
+  if (handler) handler(chunk);
 }
 
 // === agent ===
+
+async function collectViewImages(step: any): Promise<Buffer[]> {
+  const results = step.toolResults.filter(
+    (r: any) => r.toolName === "view" && typeof r.output === "string",
+  );
+  const images: Buffer[] = [];
+  for (const r of results) {
+    try {
+      images.push(await readFile(r.output));
+    } catch {}
+  }
+  return images;
+}
 
 async function runAgent(apiKey: string, prompt: string) {
   const provider = createOpenAICompatible({
@@ -514,14 +581,7 @@ async function runAgent(apiKey: string, prompt: string) {
     prepareStep: async ({ steps, messages }) => {
       const lastStep = steps.at(-1);
       if (!lastStep) return;
-      const images: Buffer[] = [];
-      for (const r of lastStep.toolResults) {
-        if (r.toolName === "view" && typeof r.output === "string") {
-          try {
-            images.push(await readFile(r.output));
-          } catch {}
-        }
-      }
+      const images = await collectViewImages(lastStep);
       if (images.length === 0) return;
       return {
         messages: [
