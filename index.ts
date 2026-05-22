@@ -120,69 +120,39 @@ interface Skill {
   filePath: string;
 }
 
-function isIndented(line: string): boolean {
-  return line.startsWith(" ") || line.startsWith("\t");
-}
-
-function readBlockScalar(
-  lines: string[],
-  startIndex: number,
-  indicator: string,
-): { value: string; newIndex: number } {
-  const blockLines: string[] = [];
-  let i = startIndex;
-  while (i < lines.length && isIndented(lines[i]!)) {
-    blockLines.push(lines[i]!.trim());
-    i++;
-  }
-  const value =
-    indicator === "|"
-      ? blockLines.join("\n").trim()
-      : blockLines.join(" ").replace(/\s+/g, " ").trim();
-  return { value, newIndex: i - 1 };
-}
-
-function parseFrontmatterLine(
-  lines: string[],
-  index: number,
-): { key?: string; value?: string; newIndex: number } {
-  const header = lines[index]!.match(/^(\w+):\s*(.*)$/);
-  if (!header) return { newIndex: index };
-
-  const key = header[1]!;
-  let value = header[2]!;
-  if (value === ">" || value === "|") {
-    const block = readBlockScalar(lines, index + 1, value);
-    return { key, value: block.value, newIndex: block.newIndex };
-  }
-  return { key, value, newIndex: index };
-}
-
-function assignFrontmatterField(
-  result: { name?: string; description?: string },
-  key: string,
-  value?: string,
-): void {
-  if (key === "name") result.name = value;
-  else if (key === "description") result.description = value;
-}
-
-function buildFrontmatterResult(lines: string[]): { name?: string; description?: string } {
-  const result: { name?: string; description?: string } = {};
-  for (let i = 0; i < lines.length; i++) {
-    const parsed = parseFrontmatterLine(lines, i);
-    if (parsed.key) {
-      i = parsed.newIndex;
-      assignFrontmatterField(result, parsed.key, parsed.value);
-    }
-  }
-  return result;
-}
-
 function parseFrontmatter(content: string): { name?: string; description?: string } {
   const match = content.match(/^---\n([\s\S]*?)---\n/);
   if (!match) return {};
-  return buildFrontmatterResult(match[1]!.split("\n"));
+
+  const result: { name?: string; description?: string } = {};
+  const lines = match[1]!.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(/^(\w+):\s*(.*)$/);
+    if (!header) continue;
+
+    const key = header[1]!;
+    let value = header[2]!;
+
+    if (value === ">" || value === "|") {
+      const blockLines: string[] = [];
+      i++;
+      while (i < lines.length && (lines[i]!.startsWith(" ") || lines[i]!.startsWith("\t"))) {
+        blockLines.push(lines[i]!.trim());
+        i++;
+      }
+      i--;
+      value =
+        value === "|"
+          ? blockLines.join("\n").trim()
+          : blockLines.join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    if (key === "name") result.name = value;
+    else if (key === "description") result.description = value;
+  }
+
+  return result;
 }
 
 function addSkill(skills: Map<string, Skill>, skill: Skill): void {
@@ -475,9 +445,9 @@ function createTools() {
 
 // === output ===
 
-const rule = () => log(dim("─".repeat(40)));
-function open(title: string) {
-  rule();
+const logRule = () => log(dim("─".repeat(40)));
+function logSection(title: string) {
+  logRule();
   log(title);
 }
 
@@ -504,11 +474,11 @@ const chunkHandlers: Record<string, (chunk: any) => void> = {
   "text-delta": (c) => process.stdout.write(c.text),
   "text-start": () => process.stdout.write("\n"),
   "text-end": () => process.stdout.write("\n"),
-  "reasoning-start": () => open(yellow(bold("思考"))),
+  "reasoning-start": () => logSection(yellow(bold("思考"))),
   "reasoning-delta": (c) => process.stdout.write(yellow(c.text)),
   "reasoning-end": () => process.stdout.write("\n"),
   "tool-call": (c) => {
-    open(`${cyan(bold("工具调用"))} ${cyan(c.toolName)}`);
+    logSection(`${cyan(bold("工具调用"))} ${cyan(c.toolName)}`);
     log(cyan(JSON.stringify(c.input)));
   },
   "tool-result": (c) => {
@@ -525,7 +495,7 @@ const chunkHandlers: Record<string, (chunk: any) => void> = {
   "tool-output-denied": (c) => log(`${yellow(bold("输出被拒绝"))} ${yellow(c.toolName)}`),
   "tool-approval-request": (c) =>
     log(`${magenta(bold("等待审批"))} ${magenta(c.toolCall.toolName)}`),
-  "start-step": () => open(bold("步骤开始")),
+  "start-step": () => logSection(bold("步骤开始")),
   "finish-step": (c) => log(dim(`步骤结束 | ${c.finishReason}`)),
   start: () => log(bold("开始")),
   finish: (c) => log(formatFinish(c)),
