@@ -11,6 +11,10 @@
     "type": "git",
     "url": "https://github.com/jerryshell/pico-agent"
   },
+  "homepage": "https://github.com/jerryshell/pico-agent#readme",
+  "bugs": {
+    "url": "https://github.com/jerryshell/pico-agent/issues"
+  },
   "bin": {
     "pa": "dist/index.js"
   },
